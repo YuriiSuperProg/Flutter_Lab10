@@ -1,19 +1,22 @@
+import 'dart:async';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import 'slot_row.dart';
-
-import 'dart:math';
+import 'sound_service.dart';
 
 class SlotMachine extends StatefulWidget {
-  const SlotMachine({super.key});
-
+  const SlotMachine({super.key, this.sound});
+  final SoundService? sound;
   @override
   State<SlotMachine> createState() =>
       _SlotMachineState();
 }
 
 class _SlotMachineState
-    extends State<SlotMachine> {
+    extends State<SlotMachine>
+    with WidgetsBindingObserver {
   static const _cherry =
       'assets/images/cherry.png';
   static const _lemon =
@@ -25,28 +28,63 @@ class _SlotMachineState
     _lemon,
     _seven,
   ];
-
-  var _message = '';
-  var _isSpinning = false;
-  var _isJackpot = false;
-
   final _random = Random();
-
   var _coins = 10;
   var _slot1 = _cherry;
   var _slot2 = _lemon;
   var _slot3 = _seven;
+  var _message = '';
+  var _isSpinning = false;
+  var _isJackpot = false;
+  late final SoundService _sound;
+  late final bool _ownsSound;
+  var _soundBusy = false;
+  String? _soundError;
+  @override
+  void initState() {
+    super.initState();
+    _ownsSound = widget.sound == null;
+    _sound = widget.sound ?? SoundService();
+    WidgetsBinding.instance.addObserver(
+      this,
+    );
+    unawaited(_sound.init());
+  }
 
-  void _reset() {
-    if (_isSpinning) return;
+  @override
+  void didChangeAppLifecycleState(
+    AppLifecycleState state,
+  ) {
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      unawaited(_muteForLifecycle());
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(
+      this,
+    );
+    if (_ownsSound)
+      unawaited(_sound.dispose());
+    super.dispose();
+  }
+
+  Future<void> _toggleMute() async {
+    if (_soundBusy) return;
+    setState(() => _soundBusy = true);
+    await _sound.setMuted(!_sound.isMuted);
+    if (!mounted) return;
     setState(() {
-      _coins = 10;
-      _slot1 = _cherry;
-      _slot2 = _lemon;
-      _slot3 = _seven;
-      _message = '';
-      _isJackpot = false;
+      _soundBusy = false;
+      _soundError = _sound.lastError;
     });
+  }
+
+  Future<void> _muteForLifecycle() async {
+    await _sound.setMuted(true);
+    if (mounted) setState(() {});
   }
 
   Future<String> _spinReel({
@@ -55,17 +93,15 @@ class _SlotMachineState
   }) async {
     String result = _symbols[0];
     for (int i = 0; i < totalTicks; i++) {
-      // Три фазы скорости в зависимости от прогресса
       final progress = i / totalTicks;
       final delay = progress < 0.5
-          ? 40 // 🟢 быстрая фаза — картинки мелькают
+          ? 40
           : progress < 0.8
-          ? 100 // 🟡 замедление
-          : 200; // 🔴 почти стоп — максимальная интрига
+          ? 100
+          : 200;
       await Future.delayed(
         Duration(milliseconds: delay),
       );
-      // Виджет могли удалить из дерева во время ожидания.
       if (!mounted) return result;
       result =
           _symbols[_random.nextInt(
@@ -86,6 +122,7 @@ class _SlotMachineState
       _isJackpot = false;
       _message = '';
     });
+    unawaited(_sound.playClick());
     final results = await Future.wait([
       _spinReel(
         totalTicks: 10,
@@ -104,13 +141,11 @@ class _SlotMachineState
       ),
     ]);
     if (!mounted) return;
-    // Итог считаем один раз, до setState.
     final isWin =
         results[0] == results[1] &&
         results[1] == results[2];
     final isJackpot =
         isWin && results[0] == _seven;
-    // Короткая пауза перед результатом.
     await Future.delayed(
       const Duration(milliseconds: 300),
     );
@@ -132,6 +167,25 @@ class _SlotMachineState
             : 'Попробуй ещё раз 😔 -1 монета';
       }
     });
+    if (isJackpot) {
+      unawaited(_sound.playJackpot());
+    } else if (isWin) {
+      unawaited(_sound.playWin());
+    } else {
+      unawaited(_sound.playLose());
+    }
+  }
+
+  void _reset() {
+    if (_isSpinning) return;
+    setState(() {
+      _coins = 10;
+      _slot1 = _cherry;
+      _slot2 = _lemon;
+      _slot3 = _seven;
+      _message = '';
+      _isJackpot = false;
+    });
   }
 
   @override
@@ -140,6 +194,31 @@ class _SlotMachineState
       mainAxisAlignment:
           MainAxisAlignment.center,
       children: [
+        Align(
+          alignment: Alignment.centerRight,
+          child: IconButton(
+            tooltip: _sound.isMuted
+                ? 'Включить звук'
+                : 'Выключить звук',
+            onPressed: _soundBusy
+                ? null
+                : _toggleMute,
+            icon: Icon(
+              _sound.isMuted
+                  ? Icons.volume_off
+                  : Icons.volume_up,
+              color: Colors.white,
+            ),
+          ),
+        ),
+        if (_soundError != null)
+          const Text(
+            'Не удалось включить звук. Нажмите значок ещё раз.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white70,
+            ),
+          ),
         Text(
           '💰 Монеты: $_coins',
           style: const TextStyle(
